@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- Debug (dev) stays a console Exe so test output is visible. Release/publish is WinExe:
+         no console window flashes when the user double-clicks the final exe from Explorer. -->
+    <OutputType Condition="'$(Configuration)' == 'Release'">WinExe</OutputType>
+    <OutputType Condition="'$(Configuration)' != 'Release'">Exe</OutputType>
+    <TargetFramework>net9.0-windows</TargetFramework>
+    <!-- Pulls in UIAutomationClient / UIAutomationTypes for System.Windows.Automation (M6). -->
+    <UseWPF>true</UseWPF>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <!-- Required for late-bound COM (Shell.Application) used by the launch-ancestry trick. -->
+    <AllowUnsafeBlocks>false</AllowUnsafeBlocks>
+    <RootNamespace>SyntheticAgent</RootNamespace>
+    <AssemblyName>SyntheticAgent</AssemblyName>
+    <!-- True single-file: fold the WPF/UIA native libs into the exe (extracted in-process at startup,
+         no child processes). Drop the PDB from the published single file. -->
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <DebugType Condition="'$(Configuration)' == 'Release'">none</DebugType>
+  </PropertyGroup>
+
+</Project>

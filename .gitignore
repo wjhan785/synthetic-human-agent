@@ -1,0 +1,9 @@
+.nuget/
+.dotnet-home/
+bin/
+obj/
+publish/
+test-output/
+*.user
+.vs/
+PLAN.md
