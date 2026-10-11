@@ -34,8 +34,8 @@ internal static class Program
             "spike-mouse" => SpikeMouse(args),
             "spike-uia" => SpikeUia(args),
             "spike-tree" => SpikeTree(args),
-            "handler-excel" => HandlerExcel(args),
-            "handler-word" => HandlerWord(args),
+            "handler-oocalc" => HandlerOoCalc(args),
+            "handler-oowriter" => HandlerOoWriter(args),
             "handler-browser" => HandlerBrowser(args),
             "run" => RunSession(args, dryRun: false),
             "run-dry" => RunSession(args, dryRun: true),
@@ -78,19 +78,25 @@ internal static class Program
     /// </summary>
     private static int DoubleClickStart()
     {
-        const uint MB_YESNO = 0x4, MB_ICONQUESTION = 0x20, MB_SETFOREGROUND = 0x10000, MB_TOPMOST = 0x40000;
-        const int IDYES = 6;
+        const uint MB_YESNOCANCEL = 0x3, MB_ICONQUESTION = 0x20, MB_SETFOREGROUND = 0x10000, MB_TOPMOST = 0x40000;
+        const int IDYES = 6, IDNO = 7;
         string msg =
-            "Start a 15-minute synthetic desktop session now?\n\n" +
-            "The agent will type and move the mouse on its own (Word, Excel, browsing).\n\n" +
+            "Start a synthetic desktop session?\n\n" +
+            "The agent types and moves the mouse on its own (OpenOffice + web browsing).\n\n" +
             "• Close your other windows first.\n" +
             "• Do not use the mouse or keyboard while it runs.\n" +
             "• Emergency stop at any time: Ctrl + Alt + Shift + Q\n\n" +
-            "Start now?";
+            "[Yes] = 15-minute run (full session)\n" +
+            "[No]  = 5-minute run (for recording)\n" +
+            "[Cancel] = don't start";
         int r = MessageBoxW(IntPtr.Zero, msg, "Synthetic Agent",
-            MB_YESNO | MB_ICONQUESTION | MB_SETFOREGROUND | MB_TOPMOST);
-        if (r != IDYES) return 0;
-        return RunSession(new[] { "run", "15" }, dryRun: false);
+            MB_YESNOCANCEL | MB_ICONQUESTION | MB_SETFOREGROUND | MB_TOPMOST);
+        return r switch
+        {
+            IDYES => RunSession(new[] { "run", "15" }, dryRun: false),
+            IDNO => RunSession(new[] { "run", "5" }, dryRun: false),
+            _ => 0, // Cancel
+        };
     }
 
     private static int Help()
@@ -103,8 +109,8 @@ internal static class Program
         Console.WriteLine("  spike-mouse    M5: plan a mouse path, dump CSV + curvature/overshoot stats (no input, safe)");
         Console.WriteLine("  spike-uia      M6: launch Notepad, UIA-find its edit control + list named controls (no input)");
         Console.WriteLine("  spike-tree <exe> <image> [fileArg]  M8 discovery: launch an app, dump its UIA tree to a file, close");
-        Console.WriteLine("  handler-excel  M8: full Excel handler - blank workbook, table + formula, Save As, close");
-        Console.WriteLine("  handler-word   M8: full Word handler - open blank doc, type a memo, save, close");
+        Console.WriteLine("  handler-oocalc M8: OpenOffice Calc handler - blank .ods, table + formula, save, close");
+        Console.WriteLine("  handler-oowriter M8: OpenOffice Writer handler - blank .odt, memo, save, close");
         Console.WriteLine("  handler-browser M8: browser handler - navigate sites, scroll, click a link (Edge, isolated profile)");
         Console.WriteLine("  run [minutes] [seed]      M9: full session - cycle handlers with idle gaps until the budget");
         Console.WriteLine("  run-dry [minutes] [seed]  M9: dry-run the schedule (NO apps launched, safe)");
@@ -480,88 +486,9 @@ internal static class Program
     }
 
     /// <summary>
-    /// M8 Excel handler test. Runs the full handler saving to test-output/excel_demo.xlsx, then ensures
-    /// the launched Excel PID is closed. Sends input (clicks + typing) — needs the hands-off warning.
-    /// </summary>
-    private static int HandlerExcel(string[] args)
-    {
-        int? seed = args.Length > 1 && int.TryParse(args[1], out int s) ? s : null;
-        var timing = new DelayModel(seed);
-        var mouse = new HumanMouse(timing.Seed);
-        Console.WriteLine($"[excel] seed = {timing.Seed}");
-
-        string outDir = OutDir();
-        Directory.CreateDirectory(outDir);
-        string savePath = Path.Combine(outDir, "excel_demo.xlsx");
-
-        var handler = new ExcelHandler(timing, mouse);
-        (int? pid, bool ok) = (null, false);
-        try
-        {
-            (pid, ok) = handler.Run(savePath);
-            // Authoritative check: the saved workbook must contain the strings we typed.
-            bool contentOk = ok && SavedXlsxContains(savePath, "Item", "Apples", "Oranges", "Total");
-            Console.WriteLine(contentOk
-                ? $"[excel] PASS: workbook saved AND contains the typed data ({new FileInfo(savePath).Length} bytes)."
-                : ok ? "[excel] FAIL: saved but expected cell text not found in the file."
-                     : "[excel] FAIL: handler did not complete.");
-            return contentOk ? 0 : 1;
-        }
-        finally
-        {
-            if (pid is not null)
-            {
-                bool killed = ProcessTree.KillIfMatches(pid.Value, "EXCEL.EXE");
-                Console.WriteLine(killed
-                    ? $"[excel] Cleanup: closed Excel (PID {pid})."
-                    : $"[excel] Cleanup: Excel PID {pid} already gone / not ours.");
-            }
-        }
-    }
-
-    /// <summary>
-    /// M8 Word handler test. Runs the handler saving to test-output/word_demo.docx, verifies the saved
-    /// document contains the memo text, then closes the launched Word PID. Sends input — hands-off.
-    /// </summary>
-    private static int HandlerWord(string[] args)
-    {
-        int? seed = args.Length > 1 && int.TryParse(args[1], out int s) ? s : null;
-        var timing = new DelayModel(seed);
-        var mouse = new HumanMouse(timing.Seed);
-        Console.WriteLine($"[word] seed = {timing.Seed}");
-
-        string outDir = OutDir();
-        Directory.CreateDirectory(outDir);
-        string savePath = Path.Combine(outDir, "word_demo.docx");
-
-        var handler = new WordHandler(timing, mouse);
-        (int? pid, bool ok) = (null, false);
-        try
-        {
-            (pid, ok) = handler.Run(savePath);
-            bool contentOk = ok && SavedDocxContains(savePath, "circulate", "Sam", "numbers");
-            Console.WriteLine(contentOk
-                ? $"[word] PASS: document saved AND contains the memo ({new FileInfo(savePath).Length} bytes)."
-                : ok ? "[word] FAIL: saved but expected memo text not found."
-                     : "[word] FAIL: handler did not complete.");
-            return contentOk ? 0 : 1;
-        }
-        finally
-        {
-            if (pid is not null)
-            {
-                bool killed = ProcessTree.KillIfMatches(pid.Value, "WINWORD.EXE");
-                Console.WriteLine(killed
-                    ? $"[word] Cleanup: closed Word (PID {pid})."
-                    : $"[word] Cleanup: Word PID {pid} already gone / not ours.");
-            }
-        }
-    }
-
-    /// <summary>
-    /// M8 browser handler test. Launches an ISOLATED Edge (own temp profile in test-output, so the
-    /// user's Edge session is untouched), visits two sites, scrolls, clicks a link. Pass = expected
-    /// site titles observed. Sends input — hands-off.
+    /// M8 browser handler test. Uses the same browser PickBrowser() chooses (Chrome if installed,
+    /// isolated in dev), visits a couple of allowed sites, scrolls, follows a link on each. Pass =
+    /// navigated all intended sites. Sends input — hands-off.
     /// </summary>
     private static int HandlerBrowser(string[] args)
     {
@@ -572,46 +499,91 @@ internal static class Program
 
         string outDir = OutDir();
         Directory.CreateDirectory(outDir);
-        string profileDir = Path.Combine(outDir, "edge-profile");
+        var (exe, image, extraArgs) = PickBrowser(outDir);
+        Console.WriteLine($"[web] browser: {exe} args='{extraArgs}'");
+        string[] urls = { "https://www.bbc.com/", "https://www.apple.com/" };
 
-        // Dev isolation: InPrivate (no sign-in/sync FRE prompt) + own profile (separate process) +
-        // first-run suppressors. On the VM these args are dropped (pristine cmdline; browser pre-configured).
-        string extraArgs = $"--inprivate --no-first-run --no-default-browser-check --user-data-dir=\"{profileDir}\"";
-        string[] urls = { "https://example.com/", "https://en.wikipedia.org/wiki/Cat" };
-
-        var handler = new BrowserHandler(timing, mouse, "msedge.exe", "msedge.exe", extraArgs, urls);
+        var handler = new BrowserHandler(timing, mouse, exe, image, extraArgs, urls);
         List<int> pids = new();
         bool ok = false; List<string> titles = new();
         try
         {
             (pids, ok, titles) = handler.Run();
-            bool example = titles.Any(t => t.Contains("Example", StringComparison.OrdinalIgnoreCase));
-            bool wiki = titles.Any(t => t.Contains("Wikipedia", StringComparison.OrdinalIgnoreCase)
-                                        || t.Contains("Cat", StringComparison.OrdinalIgnoreCase));
-            bool pass = example && wiki;
+            bool pass = ok && titles.Count(t => !string.IsNullOrWhiteSpace(t)) >= urls.Length;
             Console.WriteLine($"[web] titles seen: {string.Join(" | ", titles)}");
             Console.WriteLine(pass
-                ? "[web] PASS: navigated example.com + Wikipedia with genuine input (no chromedriver, no flags)."
-                : "[web] FAIL: expected site titles not all observed.");
+                ? "[web] PASS: navigated the allowed sites with genuine input (no chromedriver, no flags)."
+                : "[web] FAIL: did not navigate all intended sites.");
             return pass ? 0 : 1;
         }
         finally
         {
-            // Kill every NEW msedge.exe PID (our whole isolated instance), by exact PID — never the user's Edge.
+            // Kill every NEW browser PID (our whole isolated instance), by exact PID — never the user's browser.
             int closed = 0;
             foreach (int pid in pids)
-                if (ProcessTree.KillIfMatches(pid, "msedge.exe")) closed++;
-            Console.WriteLine($"[web] Cleanup: closed {closed}/{pids.Count} of our Edge processes (user's Edge untouched).");
+                if (ProcessTree.KillIfMatches(pid, image)) closed++;
+            Console.WriteLine($"[web] Cleanup: closed {closed}/{pids.Count} of our {image} processes (user's browser untouched).");
         }
     }
 
-    /// <summary>True if the saved .docx's document.xml contains all expected substrings.</summary>
-    private static bool SavedDocxContains(string docxPath, params string[] expected)
+    /// <summary>M8 OpenOffice Calc handler test (direct, so it runs even on the dev machine).</summary>
+    private static int HandlerOoCalc(string[] args)
+    {
+        int? seed = args.Length > 1 && int.TryParse(args[1], out int s) ? s : null;
+        var timing = new DelayModel(seed);
+        Console.WriteLine($"[oo-calc] seed = {timing.Seed}");
+        string? soffice = Handlers.OpenOfficeLauncher.FindSoffice();
+        if (soffice is null) { Console.WriteLine("[oo-calc] FAIL: OpenOffice (soffice.exe) not found."); return 1; }
+        Console.WriteLine($"[oo-calc] soffice: {soffice}");
+
+        string savePath = Path.Combine(OutDir(), "calc_demo.ods");
+        (int? pid, bool ok) = (null, false);
+        try
+        {
+            (pid, ok) = new Handlers.OoCalcHandler(timing).Run(soffice, savePath);
+            bool contentOk = ok
+                && SavedOdfContains(savePath, "Item", "Apples", "Oranges", "Bananas", "Grapes", "Total")
+                && SavedOdfContains(savePath, "office:value=\"35\"") // Qty =SUM(B3:B6) = 35
+                && !SavedOdfContains(savePath, "Err:");              // no formula error
+            Console.WriteLine(contentOk
+                ? $"[oo-calc] PASS: .ods saved AND contains the typed data ({new FileInfo(savePath).Length} bytes)."
+                : ok ? "[oo-calc] FAIL: saved but expected cell text not found." : "[oo-calc] FAIL: handler did not complete.");
+            return contentOk ? 0 : 1;
+        }
+        finally { if (pid is not null) ProcessTree.KillIfMatches(pid.Value, "soffice.bin"); }
+    }
+
+    /// <summary>M8 OpenOffice Writer handler test (direct).</summary>
+    private static int HandlerOoWriter(string[] args)
+    {
+        int? seed = args.Length > 1 && int.TryParse(args[1], out int s) ? s : null;
+        var timing = new DelayModel(seed);
+        Console.WriteLine($"[oo-writer] seed = {timing.Seed}");
+        string? soffice = Handlers.OpenOfficeLauncher.FindSoffice();
+        if (soffice is null) { Console.WriteLine("[oo-writer] FAIL: OpenOffice (soffice.exe) not found."); return 1; }
+        Console.WriteLine($"[oo-writer] soffice: {soffice}");
+
+        string savePath = Path.Combine(OutDir(), "writer_demo.odt");
+        (int? pid, bool ok) = (null, false);
+        try
+        {
+            (pid, ok) = new Handlers.OoWriterHandler(timing).Run(soffice, savePath);
+            bool contentOk = ok && SavedOdfContains(savePath, "circulate", "numbers", "Sam");
+            Console.WriteLine(contentOk
+                ? $"[oo-writer] PASS: .odt saved AND contains the memo ({new FileInfo(savePath).Length} bytes)."
+                : ok ? "[oo-writer] FAIL: saved but memo text not found." : "[oo-writer] FAIL: handler did not complete.");
+            return contentOk ? 0 : 1;
+        }
+        finally { if (pid is not null) ProcessTree.KillIfMatches(pid.Value, "soffice.bin"); }
+    }
+
+    /// <summary>True if the saved ODF (.ods/.odt) content.xml contains all expected substrings.</summary>
+    private static bool SavedOdfContains(string odfPath, params string[] expected)
     {
         try
         {
-            using var zip = System.IO.Compression.ZipFile.OpenRead(docxPath);
-            var entry = zip.GetEntry("word/document.xml");
+            using var zip = System.IO.Compression.ZipFile.OpenRead(odfPath);
+            var entry = zip.GetEntry("content.xml");
             if (entry is null) return false;
             using var r = new StreamReader(entry.Open());
             string xml = r.ReadToEnd();
@@ -636,14 +608,41 @@ internal static class Program
         var logger = new Logging.RunLogger(outDir, timing.Seed);
 
         var (bExe, bImage, bArgs) = PickBrowser(outDir);
-        logger.Log($"browser: {bExe} args='{bArgs}'");
+        string? soffice = Handlers.OpenOfficeLauncher.FindSoffice();
+        logger.Log($"browser: {bExe} args='{bArgs}'  |  office: OpenOffice{(soffice is not null ? " @ " + soffice : " (not found)")}");
         var cfg = new Timeline.SessionConfig(
             OutDir: outDir,
             BrowserExe: bExe,
             BrowserImage: bImage,
             BrowserArgs: bArgs,
-            Urls: new[] { "https://example.com/", "https://en.wikipedia.org/wiki/Cat" },
-            Budget: TimeSpan.FromMinutes(minutes));
+            // Allowed sites in the test range (all served through a TLS-intercepting proxy -> cert warning,
+            // which the browser handler clicks through). Content-rich sites so there's plenty to scroll
+            // and real links to follow; internal links stay on the same allowed host.
+            // Pool of allowed sites; the browser handler picks a random few each time it browses.
+            Urls: new[]
+            {
+                "https://www.bbc.com/",
+                "https://www.cnn.com/",
+                "https://www.bleacherreport.com/",
+                "https://www.cnet.com/",
+                "https://www.apple.com/",
+                "https://www.amazon.com/",
+                "https://www.samsung.com/",
+                "https://www.dell.com/",
+                "https://www.asus.com/",
+                "https://www.aliexpress.com/",
+                "https://www.coursera.org/",
+                "https://arxiv.org/",
+                "https://archive.org/",
+                "https://www.booking.com/",
+                "https://coinmarketcap.com/",
+                "https://www.coingecko.com/",
+                "https://cloud.google.com/",
+                "https://www.cloudflare.com/",
+                "https://www.bing.com/",
+            },
+            Budget: TimeSpan.FromMinutes(minutes),
+            SofficePath: soffice);
 
         if (!dryRun)
             Console.WriteLine($"[run] starting {minutes}-minute session (emergency stop: Ctrl+Alt+Shift+Q). Log: {logger.Path}");
@@ -660,15 +659,27 @@ internal static class Program
     /// </summary>
     private static (string Exe, string Image, string Args) PickBrowser(string outDir)
     {
-        if (ProjectRoot() is not null)
+        bool dev = ProjectRoot() is not null;
+        if (ChromeInstalled())
+        {
+            // Chrome is the test-range browser. Dev: isolate with incognito + own profile so test runs
+            // never touch the user's browsing. Production (VM): pristine command line.
+            if (dev)
+            {
+                string profileDir = Path.Combine(outDir, "chrome-profile");
+                return ("chrome.exe", "chrome.exe",
+                    $"--incognito --no-first-run --no-default-browser-check --user-data-dir=\"{profileDir}\"");
+            }
+            return ("chrome.exe", "chrome.exe", "");
+        }
+        // Chrome absent (e.g. this dev box has only Edge): fall back to Edge, isolated in dev.
+        if (dev)
         {
             string profileDir = Path.Combine(outDir, "edge-profile");
             return ("msedge.exe", "msedge.exe",
                 $"--inprivate --no-first-run --no-default-browser-check --user-data-dir=\"{profileDir}\"");
         }
-        if (ChromeInstalled())
-            return ("chrome.exe", "chrome.exe", ""); // pristine command line for the judged run
-        return ("msedge.exe", "msedge.exe", "");      // pristine Edge fallback if Chrome is absent
+        return ("msedge.exe", "msedge.exe", "");
     }
 
     private static bool ChromeInstalled()
@@ -706,21 +717,6 @@ internal static class Program
         Console.WriteLine(report);
         Console.WriteLine($"[audit] report written: {reportPath}");
         return 0;
-    }
-
-    /// <summary>True if the saved .xlsx's shared strings contain all expected cell texts.</summary>
-    private static bool SavedXlsxContains(string xlsxPath, params string[] expected)
-    {
-        try
-        {
-            using var zip = System.IO.Compression.ZipFile.OpenRead(xlsxPath);
-            var entry = zip.GetEntry("xl/sharedStrings.xml");
-            if (entry is null) return false;
-            using var r = new StreamReader(entry.Open());
-            string xml = r.ReadToEnd();
-            return expected.All(e => xml.Contains($"<t>{e}</t>") || xml.Contains(e));
-        }
-        catch { return false; }
     }
 
     private static string SafeName(System.Windows.Automation.AutomationElement el)

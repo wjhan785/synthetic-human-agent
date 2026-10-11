@@ -72,6 +72,12 @@ public sealed class HumanMouse
     /// </summary>
     public void MoveTo(int x, int y)
     {
+        // Safety clamp: never drive the cursor off every monitor (a bad target used to send it to the
+        // far-left edge and click outside the window, deactivating it).
+        var (vx, vy, vw, vh) = NativeInput.VirtualScreen();
+        x = Math.Clamp(x, vx + 2, vx + vw - 2);
+        y = Math.Clamp(y, vy + 2, vy + vh - 2);
+
         var (sx, sy) = NativeInput.CursorPosition();
         PreMoveJitter(sx, sy);
 
@@ -101,6 +107,20 @@ public sealed class HumanMouse
             int jy = sy + _rng.Next(-12, 13);
             NativeInput.MouseMoveAbsolute(jx, jy);
             Thread.Sleep(_rng.Next(6, 18));
+        }
+    }
+
+    /// <summary>A few small idle cursor movements around the current position (human fidget), within radius.</summary>
+    public void Wiggle(int radius = 40, int moves = -1)
+    {
+        var (cx, cy) = NativeInput.CursorPosition();
+        int n = moves > 0 ? moves : _rng.Next(1, 4);
+        for (int i = 0; i < n; i++)
+        {
+            int jx = cx + _rng.Next(-radius, radius + 1);
+            int jy = cy + _rng.Next(-radius, radius + 1);
+            MoveTo(jx, jy);
+            Thread.Sleep(80 + _rng.Next(260));
         }
     }
 

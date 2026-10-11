@@ -98,6 +98,11 @@ public static class NativeInput
         return (p.X, p.Y);
     }
 
+    /// <summary>Virtual-screen rectangle (x, y, width, height) spanning all monitors.</summary>
+    public static (int X, int Y, int W, int H) VirtualScreen() =>
+        (GetSystemMetrics(SM_XVIRTUALSCREEN), GetSystemMetrics(SM_YVIRTUALSCREEN),
+         GetSystemMetrics(SM_CXVIRTUALSCREEN), GetSystemMetrics(SM_CYVIRTUALSCREEN));
+
     private static readonly int InputSize = Marshal.SizeOf<INPUT>();
 
     private static void Send(params INPUT[] inputs)
@@ -212,6 +217,10 @@ public static class Vk
     public const ushort Escape = 0x1B;
     public const ushort Space = 0x20;
     public const ushort Home = 0x24;
+    public const ushort Left = 0x25;
+    public const ushort Up = 0x26;
+    public const ushort Right = 0x27;
+    public const ushort Down = 0x28;
     public const ushort Delete = 0x2E;
     public const ushort LWin = 0x5B;
     public const ushort A = 0x41;

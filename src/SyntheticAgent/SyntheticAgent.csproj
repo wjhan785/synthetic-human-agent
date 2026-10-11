@@ -19,6 +19,8 @@
          no child processes). Drop the PDB from the published single file. -->
     <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
     <DebugType Condition="'$(Configuration)' == 'Release'">none</DebugType>
+    <!-- Compress the single-file bundle so it's smaller to transfer (WinSCP into the VM). -->
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
   </PropertyGroup>
 
 </Project>

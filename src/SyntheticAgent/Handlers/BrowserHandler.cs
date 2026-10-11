@@ -22,6 +22,7 @@ public sealed class BrowserHandler
     private readonly string _image;
     private readonly string _extraArgs;
     private readonly string[] _urls;
+    private readonly Random _rng;
 
     public BrowserHandler(DelayModel timing, HumanMouse mouse,
                           string exe, string image, string extraArgs, string[] urls,
@@ -34,6 +35,7 @@ public sealed class BrowserHandler
         _extraArgs = extraArgs;
         _urls = urls;
         _log = log ?? Console.WriteLine;
+        _rng = new Random(unchecked(timing.Seed ^ 0x53ec));
     }
 
     public (List<int> Pids, bool Ok, List<string> Titles) Run()
@@ -68,10 +70,13 @@ public sealed class BrowserHandler
         // Dismiss any leftover first-run / sign-in / sync overlay before we start browsing.
         DismissOverlays(window, hwnd);
 
-        bool clickedLink = false;
-        for (int i = 0; i < _urls.Length; i++)
+        // Pick a RANDOM few sites from the pool for this browse session (different each time).
+        var sites = _urls.OrderBy(_ => _rng.Next()).Take(Math.Min(_urls.Length, _rng.Next(2, 5))).ToList();
+        _log($"[web] this session visits {sites.Count}/{_urls.Length} sites: {string.Join(", ", sites)}");
+
+        for (int i = 0; i < sites.Count; i++)
         {
-            string url = _urls[i];
+            string url = sites[i];
             _log($"[web] navigating to {url}");
 
             // Focus guard: never send keystrokes unless OUR window holds focus.
@@ -89,26 +94,50 @@ public sealed class BrowserHandler
             NativeInput.KeyPress(Vk.Return);
 
             string title = WaitForTitleChange(ourPids, 15000);
+            // The test range serves everything through a TLS-intercepting proxy, so each new host first
+            // shows the browser's "your connection isn't private" page — click Advanced -> Proceed.
+            if (IsCertWarning(title))
+            {
+                DismissCertWarning(window, hwnd, ourPids);
+                title = WaitForTitleChange(ourPids, 12000);
+            }
             _log($"[web] page title: '{title}'");
             if (!string.IsNullOrWhiteSpace(title)) seenTitles.Add(title);
 
-            // Read: scroll down in human bursts with pauses, then a little back up.
-            ScrollPage(window, downBursts: 3 + (i % 2));
+            // Clear any cookie/consent overlay so it doesn't cover the content we click.
+            DismissCookieBanner(window, hwnd);
+
+            // Read: scroll down in human bursts with idle fidgets.
+            ScrollPage(window, downBursts: 3 + (i % 3));
             Pause();
 
-            // On the second site, click a real link (UIA-located, genuine mouse).
-            if (i == 1 && !clickedLink)
+            // Follow a real in-page link (layer 1), then read the linked page.
+            if (ClickALink(window, hwnd, ourPids, seenTitles))
             {
-                clickedLink = ClickALink(window, ourPids, seenTitles);
+                DismissCookieBanner(window, hwnd);
+                ScrollPage(window, downBursts: 2 + (i % 2));
+                Pause();
+
+                // Sometimes go a second layer deep (more likely on news/shopping sites).
+                bool deepable = UrlLooksDeepWorthy(url);
+                if ((deepable && _rng.NextDouble() < 0.6) || _rng.NextDouble() < 0.25)
+                {
+                    _log("[web] going a second layer deep ...");
+                    if (ClickALink(window, hwnd, ourPids, seenTitles))
+                    {
+                        ScrollPage(window, downBursts: 2);
+                        Pause();
+                    }
+                }
             }
-            Pause();
         }
 
         // Close the window gracefully.
         NativeInput.KeyCombo(Vk.Menu, Vk.F4);
         Thread.Sleep(1500);
 
-        bool ok = seenTitles.Count >= _urls.Length; // navigated everywhere we intended
+        // Navigated at least the sites we chose for this session (link clicks add extra titles).
+        bool ok = seenTitles.Count(t => !string.IsNullOrWhiteSpace(t)) >= sites.Count;
         return (NewPids(before), ok, seenTitles);
     }
 
@@ -205,64 +234,240 @@ public sealed class BrowserHandler
         try { return el.Current.Name ?? ""; } catch { return ""; }
     }
 
+    /// <summary>Does a window title look like the browser's TLS/certificate interstitial?</summary>
+    private static bool IsCertWarning(string title)
+    {
+        if (string.IsNullOrEmpty(title)) return false;
+        string t = title.ToLowerInvariant();
+        return t.Contains("privacy error") || t.Contains("isn't private") || t.Contains("not private")
+               || t.Contains("certificate error") || t.Contains("security certificate");
+    }
+
+    /// <summary>
+    /// Click through the "your connection isn't private" interstitial: Advanced -> Proceed link. Falls
+    /// back to Chrome's keyboard bypass phrase if the proceed link can't be located.
+    /// </summary>
+    private void DismissCertWarning(AutomationElement window, IntPtr hwnd, List<int> pids)
+    {
+        _log("[web] certificate warning page detected; clicking through (Advanced -> Proceed).");
+        Focus(hwnd, window);
+
+        var advanced = UiaHelpers.FindByName(window, "Advanced", ControlType.Button, 2500);
+        if (advanced is not null) { InvokeOrClick(advanced); Thread.Sleep(900); }
+
+        var proceed = FindByNameContains(window,
+            new[] { "Proceed to", "unsafe", "Continue to this", "Continue to the" }, 3000);
+        if (proceed is not null)
+        {
+            InvokeOrClick(proceed);
+        }
+        else
+        {
+            // Chrome bypass: typing this on the interstitial proceeds for cert errors.
+            _log("[web] proceed link not found; using keyboard bypass.");
+            foreach (char c in "thisisunsafe") NativeInput.UnicodeChar(c);
+        }
+        Thread.Sleep(1200);
+    }
+
+    /// <summary>First visible clickable element whose name contains any of the substrings (links/buttons).</summary>
+    private AutomationElement? FindByNameContains(AutomationElement root, string[] needles, int timeoutMs)
+    {
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        while (sw.ElapsedMilliseconds < timeoutMs)
+        {
+            try
+            {
+                var cond = new OrCondition(
+                    new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Hyperlink),
+                    new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Button),
+                    new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Text));
+                var els = root.FindAll(TreeScope.Descendants, cond);
+                foreach (AutomationElement el in els)
+                {
+                    string name;
+                    try { name = el.Current.Name ?? ""; } catch { continue; }
+                    if (needles.Any(n => name.Contains(n, StringComparison.OrdinalIgnoreCase)))
+                        return el;
+                }
+            }
+            catch (ElementNotAvailableException) { }
+            Thread.Sleep(300);
+        }
+        return null;
+    }
+
+    /// <summary>Activate an element via UIA invoke, falling back to a genuine mouse click at its point.</summary>
+    private void InvokeOrClick(AutomationElement el)
+    {
+        if (UiaHelpers.TryInvoke(el)) return;
+        var pt = UiaHelpers.GetClickPoint(el);
+        if (pt is not null) _mouse.MoveClick(pt.Value.X, pt.Value.Y);
+    }
+
+    // Link/button names that are page chrome or consent UI, not article content — never follow these.
+    private static readonly string[] SkipLink =
+    {
+        "accept", "reject", "cookie", "consent", "sign in", "sign up", "log in", "login",
+        "subscribe", "accessibility", "privacy", "terms", "menu", "skip to", "settings",
+        "newsletter", "get the app", "download the app", "manage", "preferences", "advertis",
+    };
+
+    private static System.Windows.Rect WindowRect(AutomationElement window)
+    {
+        try { var r = window.Current.BoundingRectangle; return r.IsEmpty ? System.Windows.Rect.Empty : r; }
+        catch (ElementNotAvailableException) { return System.Windows.Rect.Empty; }
+    }
+
     private void ScrollPage(AutomationElement window, int downBursts)
     {
-        // Put the cursor over the page before wheel-scrolling.
-        try
+        // Move the cursor to a RANDOM spot in the page (not always dead-centre) before wheel-scrolling.
+        var r = WindowRect(window);
+        if (!r.IsEmpty)
         {
-            var r = window.Current.BoundingRectangle;
-            if (!r.IsEmpty)
-                _mouse.MoveTo((int)(r.X + r.Width / 2), (int)(r.Y + r.Height / 2));
+            int x = (int)(r.X + 100 + _rng.NextDouble() * Math.Max(1, r.Width - 200));
+            int y = (int)(r.Y + 150 + _rng.NextDouble() * Math.Max(1, r.Height * 0.55));
+            _mouse.MoveTo(x, y);
         }
-        catch (ElementNotAvailableException) { }
 
         for (int b = 0; b < downBursts; b++)
         {
             _mouse.Scroll(-(2 + (int)(_timing.NextActionDelayMs() % 3))); // scroll down
+            if (_rng.NextDouble() < 0.5) _mouse.Wiggle(30);               // small idle fidget
             Pause();
         }
-        _mouse.Scroll(1); // small scroll back up (re-reading)
+        if (_rng.NextDouble() < 0.6) _mouse.Scroll(1); // occasional scroll back up (re-reading)
     }
 
-    private bool ClickALink(AutomationElement window, List<int> pids, List<string> seenTitles)
+    private readonly HashSet<string> _clicked = new(StringComparer.OrdinalIgnoreCase);
+
+    private bool ClickALink(AutomationElement window, IntPtr hwnd, List<int> pids, List<string> seenTitles)
     {
         try
         {
-            // Search links within the page DOCUMENT only, so we don't click Edge's own chrome.
             var doc = UiaHelpers.FindByControlType(window, ControlType.Document, 3000);
             var root = doc ?? window;
+            var wr = WindowRect(window);
+            if (wr.IsEmpty) { _log("[web] no window rect."); return false; }
 
-            // The page's bounding box, to skip links that render in toolbars/footers off the page.
-            System.Windows.Rect pageRect;
-            try { pageRect = root.Current.BoundingRectangle; } catch { pageRect = System.Windows.Rect.Empty; }
+            // Target the CONTENT area: skip the browser toolbar AND the site's sticky header/hero (top
+            // ~22%) and the footer (bottom ~60px), where logos/nav/consent live. Prefer longer text
+            // (headlines) and never re-click the same link.
+            double topCut = wr.Y + Math.Max(110, wr.Height * 0.22);
+            double botCut = wr.Y + wr.Height - 60;
 
-            var links = root.FindAll(TreeScope.Descendants,
-                new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Hyperlink));
-            foreach (AutomationElement link in links)
+            var candidates = new List<(int X, int Y, string Name)>();
+            foreach (AutomationElement link in root.FindAll(TreeScope.Descendants,
+                new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Hyperlink)))
             {
                 string name;
-                try { name = link.Current.Name ?? ""; } catch { continue; }
-                if (string.IsNullOrWhiteSpace(name) || name.Length < 4) continue;
-                if (name.Contains("Privacy", StringComparison.OrdinalIgnoreCase)) continue; // skip chrome footer
+                try { name = (link.Current.Name ?? "").Trim(); } catch { continue; }
+                if (name.Length < 12) continue;
+                if (_clicked.Contains(name)) continue;
+                if (SkipLink.Any(k => name.Contains(k, StringComparison.OrdinalIgnoreCase))) continue;
 
                 var pt = UiaHelpers.GetClickPoint(link);
                 if (pt is null) continue;
-                if (!pageRect.IsEmpty &&
-                    (pt.Value.Y < pageRect.Y + 80 || pt.Value.Y > pageRect.Y + pageRect.Height - 20))
-                    continue; // skip links near the very top/bottom (likely chrome)
-
-                _log($"[web] clicking link '{name}' at {pt}");
-                _mouse.MoveClick(pt.Value.X, pt.Value.Y);
-                string title = WaitForTitleChange(pids, 12000);
-                _log($"[web] after link click, title: '{title}'");
-                if (!string.IsNullOrWhiteSpace(title)) seenTitles.Add($"(link) {title}");
-                return true;
+                if (pt.Value.X < wr.X + 6 || pt.Value.X > wr.X + wr.Width - 6) continue;
+                if (pt.Value.Y < topCut || pt.Value.Y > botCut) continue;          // content band only
+                candidates.Add((pt.Value.X, pt.Value.Y, name));
             }
+
+            if (candidates.Count == 0) { _log("[web] no suitable content link found."); return false; }
+
+            // Prefer the longest link texts (headlines), with a little randomness among the top few.
+            candidates.Sort((a, b) => b.Name.Length.CompareTo(a.Name.Length));
+            var pick = candidates[_rng.Next(Math.Min(candidates.Count, 5))];
+            _clicked.Add(pick.Name);
+
+            string before = CurrentTitle(pids);
+            _log($"[web] clicking link '{Trunc(pick.Name, 60)}' at ({pick.X},{pick.Y})");
+            _mouse.MoveClick(pick.X, pick.Y);
+
+            // Did it actually navigate? Wait for the title to CHANGE from before the click.
+            string title = WaitForTitleDifferent(pids, before, 10000);
+            if (IsCertWarning(title)) { DismissCertWarning(window, hwnd, pids); title = WaitForTitleDifferent(pids, before, 10000); }
+            bool navigated = !string.IsNullOrWhiteSpace(title) && !string.Equals(title, before, StringComparison.Ordinal);
+            if (navigated)
+            {
+                _log($"[web] link navigated -> '{Trunc(title, 80)}'");
+                seenTitles.Add($"(link) {title}");
+            }
+            else
+            {
+                _log("[web] link did nothing (title unchanged) — moving on to another site.");
+            }
+            return navigated;
         }
         catch (ElementNotAvailableException) { }
         _log("[web] no clickable link found.");
         return false;
     }
+
+    /// <summary>The browser window's current title right now (no waiting).</summary>
+    private string CurrentTitle(List<int> pids)
+    {
+        string last = "";
+        foreach (int pid in pids)
+            foreach (var w in UiaHelpers.WindowsForPid(pid))
+            {
+                try { var n = w.Current.Name ?? ""; if (!string.IsNullOrWhiteSpace(n)) last = n; }
+                catch { }
+            }
+        return last;
+    }
+
+    /// <summary>Wait until the title differs from <paramref name="before"/>; returns the new title, or `before` on timeout.</summary>
+    private string WaitForTitleDifferent(List<int> pids, string before, int timeoutMs)
+    {
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        while (sw.ElapsedMilliseconds < timeoutMs)
+        {
+            string t = CurrentTitle(pids);
+            if (!string.IsNullOrWhiteSpace(t) && !string.Equals(t, before, StringComparison.Ordinal)) return t;
+            Thread.Sleep(400);
+        }
+        return before;
+    }
+
+    /// <summary>
+    /// Dismiss the site's cookie/consent dialog (a centre-of-page DOM modal that otherwise intercepts
+    /// our link clicks). Incognito, so we just accept-all — the most reliable way to clear it. UIA
+    /// invoke (no mouse) so it can't miss the window.
+    /// </summary>
+    private void DismissCookieBanner(AutomationElement window, IntPtr hwnd)
+    {
+        // Search ONLY inside the web page (Document) — never the browser's own UI, or we'd be toggling
+        // Chrome's cookie settings instead of clicking the website's consent dialog.
+        var doc = UiaHelpers.FindByControlType(window, ControlType.Document, 2000);
+        if (doc is null) return;
+
+        string[] order =
+        {
+            "I accept all", "Accept all cookies", "Accept All Cookies", "Accept all", "Accept All",
+            "I Accept", "I agree", "Agree and close", "Yes, I agree", "Allow all", "Accept",
+            "Agree", "Got it", "Continue", "OK",
+        };
+        foreach (var label in order)
+        {
+            var btn = FindByNameContains(doc, new[] { label }, 500);
+            if (btn is not null && UiaHelpers.TryInvoke(btn))
+            {
+                _log($"[web] accepted the site's cookie dialog via '{label}'.");
+                Thread.Sleep(900); // let the modal close
+                Focus(hwnd, window);
+                return;
+            }
+        }
+    }
+
+    private static bool UrlLooksDeepWorthy(string url)
+    {
+        string[] deep = { "apnews", "bbc", "cnn", "arstechnica", "cnet", "amazon", "aliexpress", "booking", "bleacher" };
+        return deep.Any(d => url.Contains(d, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static string Trunc(string s, int n) => string.IsNullOrEmpty(s) || s.Length <= n ? (s ?? "") : s[..n] + "…";
 
     private void TypeUrl(string url)
     {

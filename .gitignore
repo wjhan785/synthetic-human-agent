@@ -7,3 +7,9 @@ test-output/
 *.user
 .vs/
 PLAN.md
+
+# Build artifact (large); not for git.
+*.iso
+
+dist/
+*.zip

@@ -15,7 +15,8 @@ public sealed record SessionConfig(
     string BrowserImage,
     string BrowserArgs,
     string[] Urls,
-    TimeSpan Budget);
+    TimeSpan Budget,
+    string? SofficePath = null); // OpenOffice soffice.exe; null = skip office activities
 
 /// <summary>
 /// Lean orchestrator: cycles the office + browsing activities in a shuffled order with realistic idle
@@ -123,27 +124,38 @@ public sealed class SessionRunner
 
     private List<Activity> BuildActivities()
     {
-        return new List<Activity>
+        var list = new List<Activity>();
+
+        // Office activities use OpenOffice only. (MS Office handling was removed.)
+        if (_cfg.SofficePath is not null)
         {
-            new("excel", "EXCEL.EXE", () =>
+            string soffice = _cfg.SofficePath;
+            list.Add(new("oo-calc", OpenOfficeLauncher.ProcessImage, () =>
             {
-                var (pid, _) = new ExcelHandler(_timing, _mouse, _log.Log)
-                    .Run(Path.Combine(_cfg.OutDir, "excel_demo.xlsx"));
+                var (pid, _) = new OoCalcHandler(_timing, _log.Log)
+                    .Run(soffice, Path.Combine(_cfg.OutDir, "calc_demo.ods"));
                 return pid is null ? new() : new() { pid.Value };
-            }, EstDurationSec: 90),
-            new("word", "WINWORD.EXE", () =>
+            }, EstDurationSec: 120));
+            list.Add(new("oo-writer", OpenOfficeLauncher.ProcessImage, () =>
             {
-                var (pid, _) = new WordHandler(_timing, _mouse, _log.Log)
-                    .Run(Path.Combine(_cfg.OutDir, "word_demo.docx"));
+                var (pid, _) = new OoWriterHandler(_timing, _log.Log)
+                    .Run(soffice, Path.Combine(_cfg.OutDir, "writer_demo.odt"));
                 return pid is null ? new() : new() { pid.Value };
-            }, EstDurationSec: 75),
-            new("browser", _cfg.BrowserImage, () =>
-            {
-                var (pids, _, _) = new BrowserHandler(_timing, _mouse,
-                    _cfg.BrowserExe, _cfg.BrowserImage, _cfg.BrowserArgs, _cfg.Urls, _log.Log).Run();
-                return pids;
-            }, EstDurationSec: 110),
-        };
+            }, EstDurationSec: 75));
+        }
+        else
+        {
+            _log.Log("note: OpenOffice (soffice.exe) not found — office activities skipped this session.");
+        }
+
+        list.Add(new("browser", _cfg.BrowserImage, () =>
+        {
+            var (pids, _, _) = new BrowserHandler(_timing, _mouse,
+                _cfg.BrowserExe, _cfg.BrowserImage, _cfg.BrowserArgs, _cfg.Urls, _log.Log).Run();
+            return pids;
+        }, EstDurationSec: 240));
+
+        return list;
     }
 
     /// <summary>Realistic between-task idle: mostly 6–25s, occasionally up to ~45s.</summary>
