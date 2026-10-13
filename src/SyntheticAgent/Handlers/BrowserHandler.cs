@@ -101,6 +101,18 @@ public sealed class BrowserHandler
                 DismissCertWarning(window, hwnd, ourPids);
                 title = WaitForTitleChange(ourPids, 12000);
             }
+
+            // If we're STILL on the interstitial, there was no bypass (e.g. an HSTS host, where Chrome
+            // offers no "Proceed" link and "thisisunsafe" is refused). The only links left on that page
+            // are traps — "Learn more about this warning" (opens a new tab) and "Running Windows Network
+            // Diagnostics" (launches the Windows troubleshooter and hangs). Do NOT scroll or click here;
+            // abandon this site and move to the next one.
+            if (IsCertWarning(title))
+            {
+                _log($"[web] still on the security interstitial for {url} (no bypass available) — skipping this site.");
+                continue;
+            }
+
             _log($"[web] page title: '{title}'");
             if (!string.IsNullOrWhiteSpace(title)) seenTitles.Add(title);
 
@@ -311,6 +323,10 @@ public sealed class BrowserHandler
         "accept", "reject", "cookie", "consent", "sign in", "sign up", "log in", "login",
         "subscribe", "accessibility", "privacy", "terms", "menu", "skip to", "settings",
         "newsletter", "get the app", "download the app", "manage", "preferences", "advertis",
+        // Security-interstitial / browser-error-page links — clicking these is a dead end (new tab,
+        // support page, or the Windows Network Diagnostics troubleshooter popup that hangs the agent).
+        "learn more", "about this warning", "network diagnostics", "diagnos", "help improve",
+        "hide advanced", "advanced", "proceed", "back to safety", "reload",
     };
 
     private static System.Windows.Rect WindowRect(AutomationElement window)
