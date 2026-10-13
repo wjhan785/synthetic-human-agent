@@ -1,4 +1,4 @@
-# Synthetic Human Agent  —  run guide
+# Mimic Agent  —  run guide
 
 **Download the .exe file from the releases on the right**
 
