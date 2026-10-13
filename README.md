@@ -1,6 +1,7 @@
 # Synthetic Human Agent  —  run guide
 
 **Download the .exe file from the releases on the right**
+For details on implementation, please see the DevPost page: https://devpost.com/software/mimic-agent
 
 ## DESCRIPTION
   A single Windows .exe that simulates a human office worker for ~15 minutes:
